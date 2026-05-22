@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Scanner Cluster + Impressão Automática</title>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qz-tray@2.2.4/qz-tray.js"></script>
+
+<style>
+body{
+    margin:0;
+    background:#07111f;
+    color:white;
+    font-family:Arial, Helvetica, sans-serif;
+    padding:20px;
+}
+
+.card{
+    max-width:1000px;
+    margin:auto;
+    background:#101d31;
+    padding:25px;
+    border-radius:22px;
+    box-shadow:0 20px 50px rgba(0,0,0,.35);
+}
+
+h1{margin-top:0}
+
+.grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:18px;
+}
+
+.box{
+    background:#0f1b2e;
+    border:1px solid rgba(255,255,255,.10);
+    padding:18px;
+    border-radius:18px;
+}
+
+input, select{
+    width:100%;
+    padding:18px;
+    margin-top:12px;
+    border:none;
+    border-radius:14px;
+    outline:none;
+    font-size:20px;
+    box-sizing:border-box;
+}
+
+button{
+    border:none;
+    padding:14px 18px;
+    border-radius:12px;
+    background:#ee4d2d;
+    color:white;
+    font-weight:bold;
+    cursor:pointer;
+    margin-top:12px;
+}
+
+button.sec{
+    background:#334155;
+}
+
+button.okbtn{
+    background:#16a34a;
+}
+
+.status{
+    margin-top:12px;
+    padding:12px;
+    border-radius:12px;
+    background:#17243a;
+}
+
+.resultado{
+    margin-top:20px;
+    background:#182742;
+    padding:25px;
+    border-radius:20px;
+    min-height:120px;
+}
+
+.cluster{
+    font-size:72px;
+    font-weight:900;
+    color:#00ff95;
+}
+
+.ok{color:#86efac}
+.erro{color:#fecaca}
+.warn{color:#fde68a}
+
+.lista{
+    max-height:360px;
+    overflow:auto;
+    margin-top:15px;
+}
+
+.item{
+    background:#182742;
+    border:1px solid rgba(255,255,255,.10);
+    padding:14px;
+    border-radius:14px;
+    margin-bottom:10px;
+}
+
+.item strong{
+    color:#00ff95;
+    font-size:26px;
+}
+
+.item small{
+    display:block;
+    color:#cbd5e1;
+    margin-top:4px;
+    word-break:break-word;
+}
+
+.linhaBotoes{
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+}
+
+@media(max-width:850px){
+    .grid{grid-template-columns:1fr}
+    .cluster{font-size:56px}
+}
+</style>
+</head>
+
+<body>
+
+<div class="card">
+
+<h1>Scanner de Cluster</h1>
+
+<div class="status" id="statusQZ">
+Carregando QZ Tray...
+</div>
+
+<h3>1. Importar Excel</h3>
+
+<input type="file" id="excelFile" accept=".xlsx,.xls,.csv">
+
+<div class="linhaBotoes">
+    <button onclick="conectarImpressora()">Conectar Impressora</button>
+</div>
+
+<div class="status" id="printerStatus">
+Impressora não conectada
+</div>
+
+<div class="grid">
+
+    <div class="box">
+        <h3>2. Escanear Shipment Id</h3>
+
+        <input
+        type="text"
+        id="scanner"
+        placeholder="Escaneie o Shipment Id"
+        autocomplete="off"
+        autofocus
+        >
+
+        <div id="resultadoScanner" class="resultado">
+        Aguardando leitura...
+        </div>
+    </div>
+
+    <div class="box">
+        <h3>3. Buscar Cluster por bairro ou CEP</h3>
+
+        <select id="tipoBusca">
+            <option value="bairro">Neighborhood / Bairro</option>
+            <option value="zipcode">Zipcode / CEP</option>
+        </select>
+
+        <input
+        type="text"
+        id="campoBusca"
+        placeholder="Digite o bairro ou CEP"
+        autocomplete="off"
+        >
+
+        <div class="linhaBotoes">
+            <button onclick="buscarManual()">Buscar</button>
+            <button class="sec" onclick="limparBuscaManual()">Limpar</button>
+        </div>
+
+        <div id="resultadoManual" class="resultado">
+        Digite um bairro ou CEP para buscar a Cluster.
+        </div>
+
+        <div id="listaManual" class="lista"></div>
+    </div>
+
+</div>
+
+</div>
+
+<script>
+
+let mapaShipment = new Map();
+let registros = [];
+let impressora = null;
+let scannerTimeout;
+let ultimoItemParaImprimir = null;
+
+const scanner = document.getElementById("scanner");
+
+window.addEventListener("load",()=>{
+
+    if(typeof qz !== "undefined"){
+
+        document.getElementById("statusQZ").innerHTML =
+        '<span class="ok">QZ Tray carregado no navegador.</span>';
+
+    }else{
+
+        document.getElementById("statusQZ").innerHTML =
+        '<span class="erro">QZ Tray não carregou.</span>';
+
+    }
+
+});
+
+function normalizar(valor){
+
+    return String(valor || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g,"")
+    .trim()
+    .toUpperCase();
+
+}
+
+function escapar(valor){
+    return String(valor || "")
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;")
+    .replaceAll("'","&#039;");
+}
+
+function limparEtiqueta(valor){
+    return String(valor || "")
+    .replaceAll('"', "'")
+    .replace(/[^\x20-\x7EÀ-ÿ]/g, "")
+    .trim();
+}
+
+function pegarValor(linha, nomes){
+    for(const nome of nomes){
+        if(linha[nome] !== undefined && linha[nome] !== null && String(linha[nome]).trim() !== ""){
+            return String(linha[nome]).trim();
+        }
+    }
+
+    const chaves = Object.keys(linha);
+    for(const chave of chaves){
+        const chaveNorm = normalizar(chave);
+        for(const nome of nomes){
+            if(chaveNorm === normalizar(nome)){
+                return String(linha[chave]).trim();
+            }
+        }
+    }
+
+    return "";
+}
+
+document.getElementById("excelFile")
+.addEventListener("change", async (e)=>{
+
+    const arquivo = e.target.files[0];
+
+    if(!arquivo) return;
+
+    const buffer = await arquivo.arrayBuffer();
+
+    const workbook = XLSX.read(buffer,{type:"array"});
+
+    const aba = workbook.Sheets[workbook.SheetNames[0]];
+
+    const json = XLSX.utils.sheet_to_json(aba,{defval:""});
+
+    mapaShipment.clear();
+    registros = [];
+
+    json.forEach(linha=>{
+
+        const shipment = normalizar(pegarValor(linha, [
+            "Shipment Id",
+            "Shipment ID",
+            "ShipmentId",
+            "shipment_id"
+        ]));
+
+        const item = {
+            shipment,
+            cluster: pegarValor(linha, ["Cluster", "cluster"]),
+            bairro: pegarValor(linha, ["Neighborhood", "Bairro", "bairro", "neighborhood"]),
+            zipcode: pegarValor(linha, ["Zipcode", "Zip Code", "CEP", "Postal Code", "zipcode", "zip_code"]),
+        };
+
+        if(item.shipment || item.bairro || item.zipcode){
+            registros.push(item);
+        }
+
+        if(item.shipment){
+            mapaShipment.set(item.shipment, item);
+        }
+
+    });
+
+    alert("Excel importado com sucesso! Registros: " + registros.length);
+
+    document.getElementById("resultadoScanner").innerHTML =
+    '<span class="ok">Base carregada. Pode escanear.</span>';
+
+    scanner.focus();
+
+});
+
+async function conectarImpressora(){
+
+    try{
+
+        if(typeof qz === "undefined"){
+
+            alert("QZ Tray não carregou.");
+            return;
+
+        }
+
+        if(!qz.websocket.isActive()){
+
+            await qz.websocket.connect({
+                rejectUnauthorized:false
+            });
+
+        }
+
+        try{
+
+            impressora = await qz.printers.find("ELGIN");
+
+        }catch{
+
+            impressora = await qz.printers.getDefault();
+
+        }
+
+        document.getElementById("printerStatus")
+        .innerHTML =
+        '<span class="ok">Impressora conectada: <b>' +
+        impressora +
+        '</b></span>';
+
+        alert("Impressora conectada!");
+
+        scanner.focus();
+
+    }catch(err){
+
+        alert("Erro ao conectar: " + err);
+
+    }
+
+}
+
+function gerarEtiqueta(item){
+
+    const cluster = limparEtiqueta(item.cluster);
+    const bairro = limparEtiqueta(item.bairro || item.zipcode || "-");
+
+return `
+SIZE 75 mm,40 mm
+GAP 3 mm,0 mm
+DIRECTION 1
+CLS
+
+TEXT 40,35,"5",0,3,3,"${cluster}"
+
+TEXT 40,170,"4",0,1,1,"${bairro}"
+
+PRINT 1
+`;
+
+}
+
+async function imprimir(item){
+
+    if(!item || !item.cluster){
+        alert("Não tem Cluster para imprimir.");
+        return;
+    }
+
+    if(!impressora){
+        alert("Conecte a impressora primeiro.");
+        return;
+    }
+
+    try{
+
+        const config = qz.configs.create(impressora);
+
+        const data = [{
+            type:'raw',
+            format:'command',
+            flavor:'plain',
+            data:gerarEtiqueta(item)
+        }];
+
+        await qz.print(config,data);
+
+    }catch(err){
+
+        alert("Erro ao imprimir: " + err);
+
+    }
+
+}
+
+scanner.addEventListener("input",()=>{
+
+    clearTimeout(scannerTimeout);
+
+    scannerTimeout = setTimeout(()=>{
+
+        let valor = normalizar(scanner.value);
+
+        if(!valor) return;
+
+        const metade = valor.length / 2;
+
+        if(
+            valor.length % 2 === 0 &&
+            valor.substring(0,metade) ===
+            valor.substring(metade)
+        ){
+
+            valor = valor.substring(0,metade);
+
+        }
+
+        buscarShipment(valor);
+
+        setTimeout(()=>{
+
+            scanner.value = "";
+            scanner.focus();
+
+        },300);
+
+    },100);
+
+});
+
+function buscarShipment(valor){
+
+    const item = mapaShipment.get(valor);
+
+    if(!item){
+
+        document.getElementById("resultadoScanner")
+        .innerHTML = `
+            <h2 class="erro">Shipment não encontrado</h2>
+            <p>${escapar(valor)}</p>
+        `;
+
+        return;
+
+    }
+
+    if(!item.cluster){
+
+        document.getElementById("resultadoScanner")
+        .innerHTML = `
+            <h2 class="erro">SEM CLUSTER</h2>
+            <p>${escapar(item.shipment)}</p>
+            <p>${escapar(item.bairro)}</p>
+        `;
+
+        return;
+
+    }
+
+    document.getElementById("resultadoScanner")
+    .innerHTML = `
+        <div class="cluster">${escapar(item.cluster)}</div>
+        <h2>${escapar(item.shipment)}</h2>
+        <p>${escapar(item.bairro)}</p>
+    `;
+
+    ultimoItemParaImprimir = item;
+    imprimir(item);
+
+}
+
+document.getElementById("campoBusca").addEventListener("keydown",(e)=>{
+    if(e.key === "Enter"){
+        buscarManual();
+    }
+});
+
+function buscarManual(){
+
+    const tipo = document.getElementById("tipoBusca").value;
+    const termoOriginal = document.getElementById("campoBusca").value.trim();
+    const termo = normalizar(termoOriginal);
+
+    const resultado = document.getElementById("resultadoManual");
+    const lista = document.getElementById("listaManual");
+
+    lista.innerHTML = "";
+
+    if(!registros.length){
+        resultado.innerHTML = '<h2 class="erro">Importe o Excel primeiro.</h2>';
+        return;
+    }
+
+    if(!termo){
+        resultado.innerHTML = '<h2 class="erro">Digite algo para buscar.</h2>';
+        return;
+    }
+
+    let encontrados = [];
+
+    if(tipo === "bairro"){
+        encontrados = registros.filter(item =>
+            normalizar(item.bairro).includes(termo)
+        );
+    }else{
+        encontrados = registros.filter(item =>
+            normalizar(item.zipcode).includes(termo)
+        );
+    }
+
+    encontrados = encontrados.filter(item => item.cluster);
+
+    if(!encontrados.length){
+        resultado.innerHTML = `
+            <h2 class="erro">Nenhum Cluster encontrado</h2>
+            <p>Busca: ${escapar(termoOriginal)}</p>
+        `;
+        return;
+    }
+
+    const clustersUnicos = [];
+    const mapaUnico = new Map();
+
+    encontrados.forEach(item=>{
+        const chave = normalizar(item.cluster) + "|" + normalizar(item.bairro) + "|" + normalizar(item.zipcode);
+        if(!mapaUnico.has(chave)){
+            mapaUnico.set(chave,item);
+            clustersUnicos.push(item);
+        }
+    });
+
+    resultado.innerHTML = `
+        <h2 class="ok">${clustersUnicos.length} resultado(s) encontrado(s)</h2>
+        <p>Você pode imprimir qualquer resultado abaixo.</p>
+    `;
+
+    lista.innerHTML = clustersUnicos.slice(0,80).map((item, index)=>`
+        <div class="item">
+            <strong>${escapar(item.cluster)}</strong>
+            <small><b>Bairro:</b> ${escapar(item.bairro || "-")}</small>
+            <small><b>Zipcode:</b> ${escapar(item.zipcode || "-")}</small>
+            <small><b>Shipment:</b> ${escapar(item.shipment || "-")}</small>
+            <button class="okbtn" onclick="imprimirResultadoManual(${index})">Imprimir esta Cluster</button>
+        </div>
+    `).join("");
+
+    window.resultadosManuaisAtuais = clustersUnicos.slice(0,80);
+
+}
+
+function imprimirResultadoManual(index){
+    const item = window.resultadosManuaisAtuais[index];
+
+    if(!item){
+        alert("Resultado não encontrado.");
+        return;
+    }
+
+    imprimir(item);
+}
+
+function limparBuscaManual(){
+    document.getElementById("campoBusca").value = "";
+    document.getElementById("resultadoManual").innerHTML =
+    "Digite um bairro ou CEP para buscar a Cluster.";
+    document.getElementById("listaManual").innerHTML = "";
+}
+
+</script>
+
+</body>
+</html>
